@@ -100,7 +100,7 @@ def build_index():
             partial_index = defaultdict(list)
             dump_num += 1
 
-        if doc_id % 5000 == 0 and doc_id > 0:
+        if doc_id % 100 == 0 and doc_id > 0:
             logger.info(f"Processed {doc_id} documents so far")
 
     # dump remaining
@@ -133,6 +133,7 @@ def merge_partial_indexes(partial_files):
 
 
 if __name__ == "__main__":
+    logger.info("Starting Indexing...")
     partial_files = build_index()
     merged = merge_partial_indexes(partial_files)
     logger.info(f"Partial index files: {partial_files}")
