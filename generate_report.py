@@ -3,8 +3,6 @@ import os
 from dataclasses import dataclass
 
 
-
-
 @dataclass
 class Data:
     indexed_documents: int
