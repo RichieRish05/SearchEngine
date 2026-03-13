@@ -5,20 +5,12 @@ from nltk.stem import PorterStemmer
 
 stemmer = PorterStemmer()
 
-# Common English stopwords - filtered at query time
-STOPWORDS = frozenset(
-    "a an the is it in on at to for of and or but not by with from as be "
-    "this that was were are been has have had do does did will would shall "
-    "should can could may might its his her he she they them their you your "
-    "we our i me my so if no nor too also very just how what when where who "
-    "which all each any some no".split()
-)
-
-
 def tokenize(text):
     tokens = re.findall(r"[a-zA-Z0-9]+", text)
-    
     return [stemmer.stem(t.lower()) for t in tokens]
+
+
+_BM25_B = 0.75  # length normalization parameter
 
 
 def load_index():
@@ -29,8 +21,12 @@ def load_index():
         offsets = json.load(f)
     with open("index/doc_map.json") as f:
         doc_map = json.load(f)
+    with open("index/doc_lengths.json") as f:
+        doc_lengths = json.load(f)
     # Open postings file handle (kept open for seeks)
     postings_fh = open("index/postings.bin", "rb")
+
+    avg_len = sum(doc_lengths.values()) / len(doc_lengths) if doc_lengths else 1
 
     print(f"Index loaded: {len(offsets):,} unique tokens, {len(doc_map):,} documents\n")
     return {
@@ -38,6 +34,8 @@ def load_index():
         "doc_map": doc_map,
         "N": len(doc_map),
         "postings_fh": postings_fh,
+        "doc_lengths": doc_lengths,
+        "avg_len": avg_len,
     }
 
 
@@ -54,14 +52,12 @@ def read_postings(idx, term):
 
 
 def search(query, idx, top_k=5):
-    """Log-frequency weighted tf-idf search with importance boost and stopword filtering."""
+    """Log-frequency weighted tf-idf search with importance boost."""
     raw_terms = tokenize(query)
     if not raw_terms:
         return []
 
-    # Filter stopwords but keep if all terms are stopwords
-    filtered = [t for t in raw_terms if t not in STOPWORDS]
-    query_terms = list(dict.fromkeys(filtered if filtered else raw_terms))
+    query_terms = list(dict.fromkeys(raw_terms))
 
     # Read posting lists from disk
     posting_lists = []
@@ -79,8 +75,10 @@ def search(query, idx, top_k=5):
     if not common_docs:
         return []
 
-    # Log-frequency weighting with idf and importance boost
+    # BM25 length-normalized tf-idf with importance boost
     N = idx["N"]
+    doc_lengths = idx["doc_lengths"]
+    avg_len = idx["avg_len"]
 
     scores = {}
     for term, postings in zip(query_terms, posting_lists):
@@ -89,13 +87,25 @@ def search(query, idx, top_k=5):
         for doc_id, tf, important in postings:
             if doc_id not in common_docs:
                 continue
-            tf_log = 1 + math.log10(tf) if tf > 0 else 0
-            boost = 1.5 if important else 1.0
+            doc_len = doc_lengths.get(str(doc_id), avg_len)
+            tf_norm = tf / (1 - _BM25_B + _BM25_B * doc_len / avg_len)
+            tf_log = 1 + math.log10(tf_norm) if tf_norm > 0 else 0
+            boost = 2.0 if important else 1.0
             scores[doc_id] = scores.get(doc_id, 0) + tf_log * idf * boost
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     doc_map = idx["doc_map"]
-    return [(doc_map[str(doc_id)], score) for doc_id, score in ranked[:top_k]]
+    seen_base = set()
+    results = []
+    for doc_id, score in ranked:
+        url = doc_map[str(doc_id)]
+        base_url = re.sub(r'/index\.[a-zA-Z]+$', '/', url.split("#")[0]).rstrip('/')
+        if base_url not in seen_base:
+            seen_base.add(base_url)
+            results.append((url, score))
+            if len(results) == top_k:
+                break
+    return results
 
 
 def run_query(query, idx, top_k=5):
