@@ -1,14 +1,18 @@
 """Convert the full JSON index into a disk-friendly format:
-  - index/postings.bin  : one posting list per line as compact JSON
-  - index/offsets.json  : token → [byte_offset, length] into postings.bin
-  - index/doc_lengths.json : doc_id → total token count (for BM25)
+  - index/postings.bin       : one posting list per line as compact JSON
+  - index/offsets.json       : token → [byte_offset, length] into postings.bin
+  - index/tokens.txt         : sorted token list (one per line)
+  - index/offsets_compact.bin: parallel binary arrays [uint64 offsets | uint32 lengths]
+  - index/doc_lengths.json   : doc_id → total token count (for BM25)
 
-This lets the search engine load only the small offsets file into memory
-and seek into postings.bin on demand, keeping memory far below index size.
+tokens.txt + offsets_compact.bin allow O(log n) bisect lookup with ~56 MB memory
+(vs ~190 MB for the offsets.json dict), satisfying the memory < index size requirement.
 """
 
+import array
 import json
 import os
+import struct
 
 
 def build_doc_lengths(index):
@@ -50,8 +54,22 @@ def main():
     with open("index/offsets.json", "w") as f:
         json.dump(offsets, f)
 
+    # Write compact binary offsets for low-memory lookup
+    print("Writing tokens.txt and offsets_compact.bin...")
+    sorted_tokens = sorted(offsets.keys())
+    offset_vals = array.array("Q", (offsets[t][0] for t in sorted_tokens))
+    length_vals = array.array("I", (offsets[t][1] for t in sorted_tokens))
+    with open("index/tokens.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(sorted_tokens))
+    n = len(sorted_tokens)
+    with open("index/offsets_compact.bin", "wb") as f:
+        f.write(struct.pack("I", n))  # 4-byte count header
+        offset_vals.tofile(f)         # n × 8 bytes
+        length_vals.tofile(f)         # n × 4 bytes
+
     # Report sizes
-    for name in ["offsets.json", "postings.bin", "doc_lengths.json"]:
+    for name in ["offsets.json", "postings.bin", "doc_lengths.json",
+                 "tokens.txt", "offsets_compact.bin"]:
         path = os.path.join("index", name)
         size_mb = os.path.getsize(path) / 1e6
         print(f"  {name}: {size_mb:.1f} MB")

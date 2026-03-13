@@ -1,6 +1,9 @@
+import array
+import bisect
 import json
 import math
 import re
+import struct
 from nltk.stem import PorterStemmer
 
 stemmer = PorterStemmer()
@@ -15,22 +18,37 @@ _BM25_B = 0.75  # length normalization parameter
 
 def load_index():
     """Load the lightweight offset index and doc metadata into memory.
-    Postings are read from disk on demand per query."""
+    Postings are read from disk on demand per query.
+
+    Uses a sorted token list + compact binary arrays (~56 MB) instead of
+    the offsets.json dict (~190 MB) to keep memory below index file size.
+    """
     print("Loading index...")
-    with open("index/offsets.json") as f:
-        offsets = json.load(f)
+    # Compact offsets: sorted tokens + parallel binary arrays
+    with open("index/tokens.txt", encoding="utf-8") as f:
+        tokens_list = f.read().splitlines()
+    with open("index/offsets_compact.bin", "rb") as f:
+        n = struct.unpack("I", f.read(4))[0]
+        offset_vals = array.array("Q")
+        offset_vals.fromfile(f, n)
+        length_vals = array.array("I")
+        length_vals.fromfile(f, n)
+
     with open("index/doc_map.json") as f:
         doc_map = json.load(f)
     with open("index/doc_lengths.json") as f:
         doc_lengths = json.load(f)
-    # Open postings file handle (kept open for seeks)
     postings_fh = open("index/postings.bin", "rb")
 
     avg_len = sum(doc_lengths.values()) / len(doc_lengths) if doc_lengths else 1
 
-    print(f"Index loaded: {len(offsets):,} unique tokens, {len(doc_map):,} documents\n")
+    print(
+        f"Index loaded: {n:,} unique tokens, {len(doc_map):,} documents\n"
+    )
     return {
-        "offsets": offsets,
+        "tokens_list": tokens_list,
+        "offset_vals": offset_vals,
+        "length_vals": length_vals,
         "doc_map": doc_map,
         "N": len(doc_map),
         "postings_fh": postings_fh,
@@ -41,10 +59,12 @@ def load_index():
 
 def read_postings(idx, term):
     """Read a single posting list from disk by seeking to its offset."""
-    entry = idx["offsets"].get(term)
-    if entry is None:
+    tokens_list = idx["tokens_list"]
+    i = bisect.bisect_left(tokens_list, term)
+    if i >= len(tokens_list) or tokens_list[i] != term:
         return None
-    offset, length = entry
+    offset = idx["offset_vals"][i]
+    length = idx["length_vals"][i]
     idx["postings_fh"].seek(offset)
     data = idx["postings_fh"].read(length)
     # Each entry is [doc_id, tf, important_flag]
