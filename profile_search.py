@@ -19,16 +19,16 @@ GOOD_QUERIES = [
 ]
 
 POOR_QUERIES = [
-    "how to apply",           # "apply" appears heavily in academic publication pages ("we apply this method"), pushing admissions pages down. Fixed by BM25: long bibliography pages penalized.
-    "python programming",     # Generic term pair; course syllabi and lab pages with many repetitions outranked focused Python tutorial pages. Fixed by BM25 length normalization.
-    "the",                    # Single high-frequency function word. Per spec, stopping is not used, so every document matches. Results are meaningless — inherently poor query.
-    "campus map directions",  # Course syllabi mention room locations and campus directions repeatedly, outranking the actual visit/directions page. Fixed by BM25.
-    "deep reinforcement learning research",  # Rare multi-term query; only a few pages match all terms. Results are limited but acceptable — poor mainly due to low recall.
-    "internship opportunities summer",       # "summer" appears in many unrelated contexts (summer courses, summer conferences). AND intersection limits noise but ranking is imprecise.
-    "ICS 33",                 # mondego.ics.uci.edu/datasets/maven-contents.txt (a raw Maven package list) was #1 due to massive size inflating raw tf. Fixed by BM25 length normalization.
-    "professor",              # Single common word; appears on every faculty/course page. Results are faculty directories (reasonable) but query is too vague for precise ranking.
-    "web crawler",            # mondego dataset was #1 — "web" and "crawler" appear many times in a giant package list. Fixed by BM25 length normalization.
-    "graduation requirements checklist",     # "checklist" is rare; AND semantics require all three terms, limiting results to a small set of grad student resource pages.
+    "how to apply",
+    "python programming",
+    "the", 
+    "campus map directions",
+    "deep reinforcement learning research",
+    "internship opportunities summer",
+    "ICS 33",                 
+    "professor",  # Duplicate pages appeared because multiple professor directories with extremely similar content, with slight versioning changes. Fixed using simhash.
+    "web crawler",            # mondego.ics.uci.edu/datasets/maven-contents.txt (a raw Maven package list) was #1 due to massive size inflating raw tf. Fixed by BM25 length normalization.
+    "graduation requirements checklist",   
 ]
 
 ALL_QUERIES = [(q, "good") for q in GOOD_QUERIES] + [(q, "poor") for q in POOR_QUERIES]

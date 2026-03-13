@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 import warnings
+from urllib.parse import urljoin, urldefrag
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, MarkupResemblesLocatorWarning
 from nltk.stem import PorterStemmer
 from collections import defaultdict
@@ -115,7 +116,30 @@ def parse_html(content):
     return BeautifulSoup(content, "lxml")
 
 
-def build_index():
+def collect_anchor_text(corpus_path):
+    """First pass: collect anchor text for each target URL.
+    Returns a dict mapping target_url → list of stemmed anchor tokens.
+    Anchor text describes the target page, so it is credited to that page at index time.
+    """
+    anchor_map = defaultdict(list)
+    for _, url, content in load_documents(corpus_path):
+        soup = parse_html(content)
+        for a in soup.find_all("a", href=True):
+            href = a["href"].strip()
+            if not href or href.startswith(("javascript:", "mailto:", "#")):
+                continue
+            try:
+                target, _ = urldefrag(urljoin(url, href))
+            except ValueError:
+                continue
+            text = a.get_text().strip()
+            if text:
+                anchor_map[target].extend(tokenize(text))
+    logger.info(f"Anchor text collected for {len(anchor_map):,} target URLs")
+    return anchor_map
+
+
+def build_index(anchor_map=None):
     DUMP_EVERY = 10000
     partial_index = defaultdict(list)
     partial_files = []
@@ -147,6 +171,13 @@ def build_index():
         doc_map[doc_id] = url
 
         important = get_important_tokens(soup)
+
+        # Augment with incoming anchor text — credited to this page as important tokens
+        if anchor_map:
+            anchor_tokens = anchor_map.get(url, [])
+            tokens = tokens + anchor_tokens
+            important = important | set(anchor_tokens)
+
         tf = compute_tf(tokens)
 
         for token, freq in tf.items():
@@ -193,7 +224,9 @@ def merge_partial_indexes(partial_files):
 
 
 if __name__ == "__main__":
-    logger.info("Starting Indexing...")
-    partial_files = build_index()
+    logger.info("Pass 1: collecting anchor text...")
+    anchor_map = collect_anchor_text(CORPUS_PATH)
+    logger.info("Pass 2: building index...")
+    partial_files = build_index(anchor_map)
     merged = merge_partial_indexes(partial_files)
     logger.info(f"Partial index files: {partial_files}")
