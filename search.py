@@ -119,6 +119,7 @@ def search(query, idx, top_k=5):
     results = []
     for doc_id, score in ranked:
         url = doc_map[str(doc_id)]
+        url = url.get("url") if isinstance(url, dict) else url
         base_url = re.sub(r'/index\.[a-zA-Z]+$', '/', url.split("#")[0]).rstrip('/')
         if base_url not in seen_base:
             seen_base.add(base_url)
