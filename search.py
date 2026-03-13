@@ -123,8 +123,8 @@ def search(query, idx, top_k=5):
         if base_url not in seen_base:
             seen_base.add(base_url)
             results.append((url, score))
-            if len(results) == top_k:
-                break
+        if len(results) == top_k:
+            break
     return results
 
 
