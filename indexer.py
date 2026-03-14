@@ -117,11 +117,12 @@ def parse_html(content):
 
 
 def collect_anchor_text(corpus_path):
-    """First pass: collect anchor text for each target URL.
+    """First pass: collect anchor text and link graph for each target URL.
     Returns a dict mapping target_url → list of stemmed anchor tokens.
-    Anchor text describes the target page, so it is credited to that page at index time.
+    Also saves index/links.json (source_url → [target_urls]) for PageRank.
     """
     anchor_map = defaultdict(list)
+    link_graph = defaultdict(set)
     for _, url, content in load_documents(corpus_path):
         soup = parse_html(content)
         for a in soup.find_all("a", href=True):
@@ -132,9 +133,14 @@ def collect_anchor_text(corpus_path):
                 target, _ = urldefrag(urljoin(url, href))
             except ValueError:
                 continue
+            link_graph[url].add(target)
             text = a.get_text().strip()
             if text:
                 anchor_map[target].extend(tokenize(text))
+    os.makedirs("index", exist_ok=True)
+    with open("index/links.json", "w") as f:
+        json.dump({k: list(v) for k, v in link_graph.items()}, f)
+    logger.info(f"Link graph: {len(link_graph):,} source URLs saved to index/links.json")
     logger.info(f"Anchor text collected for {len(anchor_map):,} target URLs")
     return anchor_map
 
@@ -151,6 +157,8 @@ def build_index(anchor_map=None):
 
     for doc_id, url, content in load_documents(CORPUS_PATH):
         soup = parse_html(content)
+        for tag in soup.find_all(["nav", "footer", "aside"]):
+            tag.decompose()
         text = soup.get_text()
 
         # Exact duplicate check (fast)
@@ -183,6 +191,13 @@ def build_index(anchor_map=None):
         for token, freq in tf.items():
             posting = {"doc_id": doc_id, "tf": freq, "important": token in important}
             partial_index[token].append(posting)
+
+        # Bigrams — stored as "stem1 stem2" keys in the same index
+        bigram_tf = defaultdict(int)
+        for i in range(len(tokens) - 1):
+            bigram_tf[f"{tokens[i]} {tokens[i+1]}"] += 1
+        for bigram, freq in bigram_tf.items():
+            partial_index[bigram].append({"doc_id": doc_id, "tf": freq, "important": False})
 
         if doc_id > 0 and doc_id % DUMP_EVERY == 0:
             path = dump_partial(partial_index, dump_num)

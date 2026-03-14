@@ -7,28 +7,28 @@ import os
 # --- Test queries (10 expected-good, 10 expected-poor) ---
 GOOD_QUERIES = [
     "cristina lopes",
-    "machine learning",
+    "Thornton",
     "ACM",
     "master of software engineering",
     "information retrieval",
-    "computer science",
-    "artificial intelligence",
+    "AI Club",
     "software engineering",
     "data structure",
     "algorithms",
+    "Donald Bren Hall"
 ]
 
 POOR_QUERIES = [
+    "ICS 33",
+    "web crawler",
+    "professor",
+    "UCI admissions",
+    "campus map directions",
+    "machine learning",
+    "computer science",
     "how to apply",
     "python programming",
-    "the", 
-    "campus map directions",
-    "deep reinforcement learning research",
-    "internship opportunities summer",
-    "ICS 33",                 
-    "professor",  # Duplicate pages appeared because multiple professor directories with extremely similar content, with slight versioning changes. Fixed using simhash.
-    "web crawler",            # mondego.ics.uci.edu/datasets/maven-contents.txt (a raw Maven package list) was #1 due to massive size inflating raw tf. Fixed by BM25 length normalization.
-    "graduation requirements checklist",   
+    "artificial intelligence"
 ]
 
 ALL_QUERIES = [(q, "good") for q in GOOD_QUERIES] + [(q, "poor") for q in POOR_QUERIES]
@@ -46,12 +46,15 @@ def main():
     mem_after = tracemalloc.get_traced_memory()[0]
     mem_peak = tracemalloc.get_traced_memory()[1]
 
-    index_file_size = os.path.getsize("index/postings.bin") + os.path.getsize("index/offsets.json")
+    index_files = ["postings.bin", "offsets.json", "tokens.txt", "offsets_compact.bin",
+                   "doc_lengths.json", "doc_map.json", "pagerank.json"]
+    index_file_size = sum(os.path.getsize(f"index/{fn}") for fn in index_files
+                          if os.path.exists(f"index/{fn}"))
 
     print("=" * 70)
     print("SEARCH ENGINE PROFILE")
     print("=" * 70)
-    print(f"Index files size:     {index_file_size / 1e6:.1f} MB (postings.bin + offsets.json)")
+    print(f"Index files size:     {index_file_size / 1e6:.1f} MB (all index files)")
     print(f"Memory used:          {(mem_after - mem_before) / 1e6:.1f} MB")
     print(f"Peak memory:          {mem_peak / 1e6:.1f} MB")
     print(f"Index load time:      {load_time:.2f} s")

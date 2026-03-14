@@ -16,9 +16,13 @@ import struct
 
 
 def build_doc_lengths(index):
-    """Sum tf across all terms for each document to get document length."""
+    """Sum tf across all unigram terms for each document to get document length.
+    Bigrams (keys containing a space) are excluded to avoid inflating BM25 denominators.
+    """
     lengths = {}
-    for postings in index.values():
+    for token, postings in index.items():
+        if " " in token:  # skip bigrams
+            continue
         for p in postings:
             doc_id = p["doc_id"]
             lengths[doc_id] = lengths.get(doc_id, 0) + p["tf"]
@@ -75,6 +79,10 @@ def main():
         print(f"  {name}: {size_mb:.1f} MB")
 
     print("Done.")
+
+    # Compute PageRank from the link graph saved by indexer.py
+    import compute_pagerank
+    compute_pagerank.main()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,14 @@ def load_index():
 
     avg_len = sum(doc_lengths.values()) / len(doc_lengths) if doc_lengths else 1
 
+    pr_scores = {}
+    try:
+        with open("index/pagerank.json") as f:
+            pr_scores = json.load(f)
+        print(f"PageRank loaded: {len(pr_scores):,} scores")
+    except FileNotFoundError:
+        pass
+
     print(
         f"Index loaded: {n:,} unique tokens, {len(doc_map):,} documents\n"
     )
@@ -54,6 +62,7 @@ def load_index():
         "postings_fh": postings_fh,
         "doc_lengths": doc_lengths,
         "avg_len": avg_len,
+        "pr_scores": pr_scores,
     }
 
 
@@ -112,6 +121,26 @@ def search(query, idx, top_k=5):
             tf_log = 1 + math.log10(tf_norm) if tf_norm > 0 else 0
             boost = 2.0 if important else 1.0
             scores[doc_id] = scores.get(doc_id, 0) + tf_log * idf * boost
+
+    # Bigram bonus — rewards exact phrase matches beyond unigram overlap
+    if len(query_terms) > 1:
+        for i in range(len(query_terms) - 1):
+            bigram = f"{query_terms[i]} {query_terms[i+1]}"
+            bi_postings = read_postings(idx, bigram)
+            if bi_postings:
+                df = len(bi_postings)
+                idf = math.log10(N / df)
+                for doc_id, tf, _ in bi_postings:
+                    if doc_id in common_docs:
+                        tf_log = 1 + math.log10(tf) if tf > 0 else 0
+                        scores[doc_id] = scores.get(doc_id, 0) + tf_log * idf * 1.5
+
+    # PageRank multiplicative boost (neutral when pr=0, up to 1.5× at max PR)
+    pr_scores = idx.get("pr_scores", {})
+    if pr_scores:
+        for doc_id in scores:
+            pr = pr_scores.get(str(doc_id), 0.0)
+            scores[doc_id] *= (1 + 0.5 * pr)
 
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     doc_map = idx["doc_map"]
