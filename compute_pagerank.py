@@ -11,8 +11,8 @@ Run once after indexer.py, before optimize_index.py or search.py.
 import json
 from collections import defaultdict
 
-DAMPING = 0.85
-ITERATIONS = 50
+DAMPING = 0.85    # probability of following a link (standard PageRank value)
+ITERATIONS = 50   # number of power-iteration steps
 
 
 def main():
@@ -28,7 +28,7 @@ def main():
     N = len(indexed_ids)
     print(f"  {N:,} indexed documents, {len(raw_links):,} source URLs in link graph")
 
-    # Build adjacency restricted to indexed pages
+    # Build adjacency restricted to indexed pages; ignore self-links
     out_links = defaultdict(set)  # src_id → {tgt_id, ...}
     in_links = defaultdict(set)   # tgt_id → {src_id, ...}
     for src_url, targets in raw_links.items():
@@ -44,11 +44,12 @@ def main():
 
     print(f"  {len(out_links):,} pages with outgoing links")
 
-    # PageRank iteration
-    pr = {doc_id: 1.0 / N for doc_id in indexed_ids}
+    # PageRank power iteration: PR(p) = (1-d)/N + d * sum(PR(q)/|out(q)|)
+    pr = {doc_id: 1.0 / N for doc_id in indexed_ids}  # uniform initialization
     for iteration in range(ITERATIONS):
         new_pr = {}
         for doc_id in indexed_ids:
+            # Sum contributions from all pages that link to this page
             rank_sum = sum(
                 pr[j] / len(out_links[j])
                 for j in in_links[doc_id]
@@ -58,7 +59,10 @@ def main():
         pr = new_pr
         if (iteration + 1) % 10 == 0:
             print(f"  Iteration {iteration + 1}/{ITERATIONS}")
-    print(sum(pr.values()))
+
+    print(sum(pr.values()))  # should be ~1.0 (sanity check)
+
+    # Normalize to [0, 1] by dividing by max PR — used as a multiplicative boost in search
     max_pr = max(pr.values())
     min_pr = min(pr.values())
     pr_norm = {str(k): v / max_pr for k, v in pr.items()}

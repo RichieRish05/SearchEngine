@@ -1,47 +1,100 @@
+"""Search engine: loads the inverted index and answers queries using BM25 + PageRank."""
+
 import array
-import bisect
 import json
 import math
 import re
 import struct
+import time
 from nltk.stem import PorterStemmer
 
 stemmer = PorterStemmer()
 
+
 def tokenize(text):
+    """Extract alphanumeric tokens and apply Porter stemming (matches indexer)."""
     tokens = re.findall(r"[a-zA-Z0-9]+", text)
     return [stemmer.stem(t.lower()) for t in tokens]
 
 
-_BM25_B = 0.75  # length normalization parameter
+_BM25_B = 0.75  # BM25 length normalization strength (0 = no normalization, 1 = full)
+
+
+def _load_tokens_compact(path):
+    """Load tokens.txt as a single bytes object + array of line-start offsets.
+    Uses ~70 MB instead of ~430 MB from a Python list of strings.
+    data.split() is a C-level call; we then compute cumulative byte offsets in Python.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    parts = data.split(b"\n")
+    if parts and not parts[-1]:  # drop trailing empty entry if file ends with \n
+        parts.pop()
+    offsets = array.array("I")  # uint32 — sufficient since tokens.txt is < 4 GB
+    pos = 0
+    for p in parts:
+        offsets.append(pos)
+        pos += len(p) + 1  # +1 for the '\n' separator
+    return data, offsets
+
+
+def _bisect_tokens(data, offsets, term):
+    """Binary search for term in the compact bytes buffer. Returns index or -1.
+    Slices data[start:end] for each midpoint — no Python string objects created.
+    """
+    term_b = term.encode("utf-8")
+    n = len(offsets)
+    lo, hi = 0, n - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        start = offsets[mid]
+        end = offsets[mid + 1] - 1 if mid + 1 < n else len(data)  # exclude '\n'
+        token = data[start:end]
+        if token == term_b:
+            return mid
+        elif token < term_b:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return -1
 
 
 def load_index():
     """Load the lightweight offset index and doc metadata into memory.
-    Postings are read from disk on demand per query.
+    Postings are NOT loaded — they are read from disk on demand per query.
 
-    Uses a sorted token list + compact binary arrays (~56 MB) instead of
-    the offsets.json dict (~190 MB) to keep memory below index file size.
+    What lives in memory:
+      - tokens_bytes / tokens_offsets : compact lexicon (~70 MB)
+      - offset_vals / length_vals     : byte offsets into postings.bin (~57 MB)
+      - doc_map, doc_lengths, pr_scores: per-document metadata (~small)
     """
     print("Loading index...")
-    # Compact offsets: sorted tokens + parallel binary arrays
-    with open("index/tokens.txt", encoding="utf-8") as f:
-        tokens_list = f.read().splitlines()
+
+    # Compact lexicon: bytes buffer + parallel uint32 offset array
+    tokens_bytes, tokens_offsets = _load_tokens_compact("index/tokens.txt")
+
+    # Binary file: [4-byte count][n × uint64 offsets][n × uint32 lengths]
     with open("index/offsets_compact.bin", "rb") as f:
         n = struct.unpack("I", f.read(4))[0]
-        offset_vals = array.array("Q")
+        offset_vals = array.array("Q")   # uint64: byte offset of each posting list
         offset_vals.fromfile(f, n)
-        length_vals = array.array("I")
+        length_vals = array.array("I")   # uint32: byte length of each posting list
         length_vals.fromfile(f, n)
 
+    # doc_id (str) → URL
     with open("index/doc_map.json") as f:
         doc_map = json.load(f)
+    # doc_id (str) → total token count (used for BM25 length normalization)
     with open("index/doc_lengths.json") as f:
         doc_lengths = json.load(f)
+
+    # Keep postings.bin open; seek to offsets on each query
     postings_fh = open("index/postings.bin", "rb")
 
+    # Average document length across corpus (BM25 denominator)
     avg_len = sum(doc_lengths.values()) / len(doc_lengths) if doc_lengths else 1
 
+    # PageRank scores (optional — search still works without this file)
     pr_scores = {}
     try:
         with open("index/pagerank.json") as f:
@@ -50,11 +103,10 @@ def load_index():
     except FileNotFoundError:
         pass
 
-    print(
-        f"Index loaded: {n:,} unique tokens, {len(doc_map):,} documents\n"
-    )
+    print(f"Index loaded: {n:,} unique tokens, {len(doc_map):,} documents\n")
     return {
-        "tokens_list": tokens_list,
+        "tokens_bytes": tokens_bytes,
+        "tokens_offsets": tokens_offsets,
         "offset_vals": offset_vals,
         "length_vals": length_vals,
         "doc_map": doc_map,
@@ -67,11 +119,10 @@ def load_index():
 
 
 def read_postings(idx, term):
-    """Read a single posting list from disk by seeking to its offset."""
-    tokens_list = idx["tokens_list"]
-    i = bisect.bisect_left(tokens_list, term)
-    if i >= len(tokens_list) or tokens_list[i] != term:
-        return None
+    """Locate term in the lexicon via binary search, then seek to its posting list on disk."""
+    i = _bisect_tokens(idx["tokens_bytes"], idx["tokens_offsets"], term)
+    if i < 0:
+        return None  # term not in index
     offset = idx["offset_vals"][i]
     length = idx["length_vals"][i]
     idx["postings_fh"].seek(offset)
@@ -81,22 +132,30 @@ def read_postings(idx, term):
 
 
 def search(query, idx, top_k=5):
-    """Log-frequency weighted tf-idf search with importance boost."""
+    """Score documents using BM25 tf-idf with importance boost, bigram bonus, and PageRank.
+
+    Scoring layers (additive except PageRank):
+      1. BM25 tf-idf  — length-normalized term frequency × IDF
+      2. Importance boost (×2) — term appears in title/heading/bold
+      3. Bigram bonus (×1.5 IDF) — consecutive query terms appear together
+      4. PageRank boost (×1 to ×1.5) — multiplicative, proportional to PR score
+    """
     raw_terms = tokenize(query)
     if not raw_terms:
         return []
 
+    # Deduplicate while preserving order
     query_terms = list(dict.fromkeys(raw_terms))
 
-    # Read posting lists from disk
+    # Boolean AND: fetch posting lists; return empty if any term is missing
     posting_lists = []
     for term in query_terms:
         postings = read_postings(idx, term)
         if postings is None:
-            return []  # AND semantics: missing term → no results
+            return []  # AND semantics — all terms must appear
         posting_lists.append(postings)
 
-    # Intersect document sets
+    # Intersect to find documents containing all query terms
     common_docs = set(p[0] for p in posting_lists[0])
     for pl in posting_lists[1:]:
         common_docs &= set(p[0] for p in pl)
@@ -104,25 +163,25 @@ def search(query, idx, top_k=5):
     if not common_docs:
         return []
 
-    # BM25 length-normalized tf-idf with importance boost
     N = idx["N"]
     doc_lengths = idx["doc_lengths"]
     avg_len = idx["avg_len"]
 
+    # Score each term: BM25 tf-idf × importance boost
     scores = {}
     for term, postings in zip(query_terms, posting_lists):
-        df = len(postings)
-        idf = math.log10(N / df)
+        df = len(postings)                              # document frequency
+        idf = math.log10(N / df)                        # inverse document frequency
         for doc_id, tf, important in postings:
             if doc_id not in common_docs:
                 continue
             doc_len = doc_lengths.get(str(doc_id), avg_len)
-            tf_norm = tf / (1 - _BM25_B + _BM25_B * doc_len / avg_len)
-            tf_log = 1 + math.log10(tf_norm) if tf_norm > 0 else 0
-            boost = 2.0 if important else 1.0
+            tf_norm = tf / (1 - _BM25_B + _BM25_B * doc_len / avg_len)  # BM25 normalization
+            tf_log = 1 + math.log10(tf_norm) if tf_norm > 0 else 0       # log-frequency weight
+            boost = 2.0 if important else 1.0           # double weight for title/heading terms
             scores[doc_id] = scores.get(doc_id, 0) + tf_log * idf * boost
 
-    # Bigram bonus — rewards exact phrase matches beyond unigram overlap
+    # Bigram bonus: reward documents where adjacent query terms co-occur
     if len(query_terms) > 1:
         for i in range(len(query_terms) - 1):
             bigram = f"{query_terms[i]} {query_terms[i+1]}"
@@ -135,13 +194,14 @@ def search(query, idx, top_k=5):
                         tf_log = 1 + math.log10(tf) if tf > 0 else 0
                         scores[doc_id] = scores.get(doc_id, 0) + tf_log * idf * 1.5
 
-    # PageRank multiplicative boost (neutral when pr=0, up to 1.5× at max PR)
+    # PageRank multiplicative boost: high-authority pages score up to 1.5× higher
     pr_scores = idx.get("pr_scores", {})
     if pr_scores:
         for doc_id in scores:
-            pr = pr_scores.get(str(doc_id), 0.0)
+            pr = pr_scores.get(str(doc_id), 0.0)  # normalized [0, 1]
             scores[doc_id] *= (1 + 0.5 * pr)
 
+    # Sort by score descending; deduplicate by base URL to avoid near-duplicate results
     ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     doc_map = idx["doc_map"]
     seen_base = set()
@@ -149,6 +209,7 @@ def search(query, idx, top_k=5):
     for doc_id, score in ranked:
         url = doc_map[str(doc_id)]
         url = url.get("url") if isinstance(url, dict) else url
+        # Normalize URL: strip index.html and fragment so /foo/index.html == /foo/
         base_url = re.sub(r'/index\.[a-zA-Z]+$', '/', url.split("#")[0]).rstrip('/')
         if base_url not in seen_base:
             seen_base.add(base_url)
@@ -159,8 +220,11 @@ def search(query, idx, top_k=5):
 
 
 def run_query(query, idx, top_k=5):
+    """Run a single query, print results and elapsed time to stdout."""
+    t0 = time.perf_counter()
     results = search(query, idx, top_k)
-    print(f"Query: '{query}'")
+    elapsed_ms = (time.perf_counter() - t0) * 1000
+    print(f"Query: '{query}'  ({elapsed_ms:.1f} ms)")
     if not results:
         print("  No results found.")
     else:
@@ -171,6 +235,7 @@ def run_query(query, idx, top_k=5):
 
 
 def main():
+    """Interactive search loop — type a query, press Enter, see top-5 results."""
     idx = load_index()
 
     while True:
